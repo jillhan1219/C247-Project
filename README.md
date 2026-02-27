@@ -173,5 +173,4 @@ This shows that training with augmentation from the beginning can achieve compet
 
 ---
 
-Author: Jenny Ho
-UCLA MEng in Artificial Intelligence
+Jenny Ho
