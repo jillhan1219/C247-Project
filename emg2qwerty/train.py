@@ -64,11 +64,19 @@ def main(config: DictConfig):
     )
     if config.checkpoint is not None:
         log.info(f"Loading module from checkpoint {config.checkpoint}")
+        # Pass current module config so CLI overrides (e.g. transformer_chunk_size)
+        # take effect instead of the values baked into the checkpoint's hparams.
+        module_overrides = {
+            k: v for k, v in config.module.items()
+            if k not in ("_target_",)
+        }
         module = module.load_from_checkpoint(
             config.checkpoint,
             optimizer=config.optimizer,
             lr_scheduler=config.lr_scheduler,
             decoder=config.decoder,
+            strict=False,
+            **module_overrides,
         )
 
     # Instantiate LightningDataModule

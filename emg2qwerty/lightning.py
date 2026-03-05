@@ -25,6 +25,7 @@ from emg2qwerty.modules import (
     MultiBandRotationInvariantMLP,
     SpectrogramNorm,
     TDSConvEncoder,
+    TransformerEncoder,
 )
 from emg2qwerty.transforms import Transform
 
@@ -91,6 +92,7 @@ class WindowedEMGDataModule(pl.LightningDataModule):
                     transform=self.test_transform,
                     # Feed the entire session at once without windowing/padding
                     # at test time for more realism
+                    #window_length=self.window_length,
                     window_length=None,
                     padding=(0, 0),
                     jitter=False,
@@ -150,6 +152,15 @@ class TDSConvCTCModule(pl.LightningModule):
         optimizer: DictConfig,
         lr_scheduler: DictConfig,
         decoder: DictConfig,
+        spec_norm_type: str = "BatchNorm2d",
+        share_hand_weights: bool = False,
+        use_transformer: bool = False,
+        transformer_d_model: int = 256,
+        transformer_nhead: int = 8,
+        transformer_num_layers: int = 6,
+        transformer_dim_feedforward: int = 1024,
+        transformer_max_len: int = 150000,
+        transformer_chunk_size: int = 0,
     ) -> None:
         super().__init__()
         self.save_hyperparameters()
@@ -158,26 +169,52 @@ class TDSConvCTCModule(pl.LightningModule):
 
         # Model
         # inputs: (T, N, bands=2, electrode_channels=16, freq)
-        self.model = nn.Sequential(
+        model_layers = [
             # (T, N, bands=2, C=16, freq)
-            SpectrogramNorm(channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS),
+            SpectrogramNorm(
+                channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS,
+                spec_norm_type=spec_norm_type,
+            ),
             # (T, N, bands=2, mlp_features[-1])
             MultiBandRotationInvariantMLP(
                 in_features=in_features,
                 mlp_features=mlp_features,
                 num_bands=self.NUM_BANDS,
+                share_hand_weights=share_hand_weights,
             ),
             # (T, N, num_features)
             nn.Flatten(start_dim=2),
+        ]
+
+        # Add Transformer encoder if enabled
+        if use_transformer:
+            model_layers.append(nn.Linear(num_features, transformer_d_model))
+            model_layers.append(
+                TransformerEncoder(
+                    d_model=transformer_d_model,
+                    nhead=transformer_nhead,
+                    num_layers=transformer_num_layers,
+                    dim_feedforward=transformer_dim_feedforward,
+                    max_len=transformer_max_len,
+                    chunk_size=transformer_chunk_size,
+                )
+            )
+            model_layers.append(nn.Linear(transformer_d_model, num_features))
+
+        # Add TDS Conv Encoder
+        model_layers.extend([
             TDSConvEncoder(
                 num_features=num_features,
                 block_channels=block_channels,
                 kernel_width=kernel_width,
+                share_hand_weights=share_hand_weights,
             ),
             # (T, N, num_classes)
             nn.Linear(num_features, charset().num_classes),
             nn.LogSoftmax(dim=-1),
-        )
+        ])
+
+        self.model = nn.Sequential(*model_layers)
 
         # Criterion
         self.ctc_loss = nn.CTCLoss(blank=charset().null_class)

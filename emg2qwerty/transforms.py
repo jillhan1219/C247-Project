@@ -190,6 +190,79 @@ class LogSpectrogram:
 
 
 @dataclass
+class NewLogSpectrogram:
+    """Reduced Spectral Granularity (RSG) spectrogram that aggregates frequency
+    bins into 6 bands based on EMG frequency ranges.
+
+    Aggregates 33 frequency bins (from n_fft=64) into 6 bands:
+    - Band 0: 31.25-62.5 Hz
+    - Band 1: 62.5-125 Hz
+    - Band 2: 125-250 Hz
+    - Band 3: 250-375 Hz
+    - Band 4: 375-687.5 Hz
+    - Band 5: 687.5-1000 Hz
+
+    This reduces computation and improves model efficiency.
+
+    Args:
+        n_fft (int): Size of FFT, creates n_fft // 2 + 1 frequency bins.
+            (default: 64)
+        hop_length (int): Number of samples to stride between consecutive
+            STFT windows. (default: 16)
+        sample_rate (int): Sample rate of the EMG signal. (default: 2000)
+    """
+
+    n_fft: int = 64
+    hop_length: int = 16
+    sample_rate: int = 2000
+
+    def __post_init__(self) -> None:
+        self.spectrogram = torchaudio.transforms.Spectrogram(
+            n_fft=self.n_fft,
+            hop_length=self.hop_length,
+            normalized=True,
+            center=False,
+        )
+        self._create_aggregation_matrix()
+
+    def _create_aggregation_matrix(self) -> None:
+        freq_ranges = [
+            (31.25, 62.5),
+            (62.5, 125),
+            (125, 250),
+            (250, 375),
+            (375, 687.5),
+            (687.5, 1000),
+        ]
+
+        num_bins = self.n_fft // 2 + 1
+        aggregation = torch.zeros((6, num_bins))
+
+        for i, (lower, upper) in enumerate(freq_ranges):
+            lower_bin = int(lower * self.n_fft / self.sample_rate)
+            upper_bin = int(upper * self.n_fft / self.sample_rate)
+            if upper == self.sample_rate // 2:
+                upper_bin = num_bins
+            aggregation[i, lower_bin:upper_bin] = 1
+
+        self.aggregation_matrix = aggregation
+
+    def __call__(self, tensor: torch.Tensor) -> torch.Tensor:
+        x = tensor.movedim(0, -1)
+        spec = self.spectrogram(x)
+        logspec = torch.log10(spec + 1e-6).movedim(-1, 0)
+
+        orig_shape = logspec.shape
+        logspec = logspec.view(-1, orig_shape[-2], orig_shape[-1])
+
+        aggregated = torch.einsum(
+            "...cf,bf->...cb", logspec, self.aggregation_matrix
+        )
+
+        return aggregated.view(orig_shape[:-1] + (6,))
+
+
+@dataclass
 class SpecAugment:
     """Applies time and frequency masking as per the paper
     "SpecAugment: A Simple Data Augmentation Method for Automatic Speech

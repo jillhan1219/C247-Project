@@ -20,10 +20,10 @@ logspec:
 
 specaug:
   _target_: emg2qwerty.transforms.SpecAugment
-  n_time_masks: 3
+  n_time_masks: 0  # Aggressive Channel Masking: disable time masks 0
   time_mask_param: 25  # Max 200ms per time mask for 125Hz spectrogram
   n_freq_masks: 2
-  freq_mask_param: 4
+  freq_mask_param: 12  # Aggressive Channel Masking: increased from 4 to 12
 
 transforms:
   train:
