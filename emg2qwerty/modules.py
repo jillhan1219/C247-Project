@@ -278,3 +278,70 @@ class TDSConvEncoder(nn.Module):
 
     def forward(self, inputs: torch.Tensor) -> torch.Tensor:
         return self.tds_conv_blocks(inputs)  # (T, N, num_features)
+
+class LSTMEncoder(nn.Module):
+    """
+    LSTM-based encoder for sEMG sequence modeling.
+    Designed to replace the baseline TDSConvEncoder for better context awareness.
+    """
+    def __init__(self, in_features=528, hidden_dim=512, num_layers=3, dropout=0.2):
+        super().__init__()
+        
+        # Bidirectional LSTM to capture both past and future muscle signal contexts
+        self.lstm = nn.LSTM(
+            input_size=in_features,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=False,
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=True
+        )
+        
+        # Projection layer to map bidirectional output (hidden_dim * 2) back to hidden_dim
+        self.projector = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim), # For training stability
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        """
+        Forward pass for the LSTM Encoder.
+        Args:
+            x (torch.Tensor): Input sEMG spectrogram of shape (Batch, Seq_Len, In_Features)
+        Returns:
+            torch.Tensor: Encoded features of shape (Batch, Seq_Len, Hidden_Dim)
+        """
+        # lstm_out shape: (Batch, Seq_Len, Hidden_Dim * 2)
+        lstm_out, _ = self.lstm(x)
+        
+        # Map to final latent space
+        return self.projector(lstm_out)
+
+
+class GRUEncoder(nn.Module):
+    """
+    Lighter than LSTM, better for avoiding OOM on Tesla T4.
+    """
+    def __init__(self, in_features, hidden_dim=512, num_layers=3, dropout=0.2):
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=in_features,
+            hidden_size=hidden_dim,
+            num_layers=num_layers,
+            batch_first=False, # Matches (T, N, C) input
+            dropout=dropout if num_layers > 1 else 0,
+            bidirectional=True
+        )
+        self.projector = nn.Sequential(
+            nn.Linear(hidden_dim * 2, hidden_dim),
+            nn.LayerNorm(hidden_dim),
+            nn.ReLU(),
+            nn.Dropout(dropout)
+        )
+
+    def forward(self, x):
+        # x: (T, N, features) -> out: (T, N, hidden_dim * 2)
+        out, _ = self.gru(x)
+        return self.projector(out)

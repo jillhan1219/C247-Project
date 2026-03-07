@@ -1,0 +1,14 @@
+# @package _global_
+module:
+  _target_: emg2qwerty.lightning.RNNCTCModule
+  in_features: 528
+  mlp_features: [384]
+  rnn_type: "gru"      # "lstm"으로 바꾸면 바로 LSTM 실험 가능
+  hidden_dim: 512
+  num_layers: 3
+  dropout: 0.2
+
+datamodule:
+  _target_: emg2qwerty.lightning.WindowedEMGDataModule
+  window_length: 8000
+  padding: [1800, 200]
