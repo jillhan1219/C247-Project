@@ -22,6 +22,7 @@ from emg2qwerty.charset import charset
 from emg2qwerty.data import LabelData, WindowedEMGDataset
 from emg2qwerty.metrics import CharacterErrorRates
 from emg2qwerty.modules import (
+    BiGRUEncoder,
     MultiBandRotationInvariantMLP,
     SpectrogramNorm,
     TDSConvEncoder,
@@ -154,6 +155,7 @@ class TDSConvCTCModule(pl.LightningModule):
         decoder: DictConfig,
         spec_norm_type: str = "BatchNorm2d",
         share_hand_weights: bool = False,
+        pre_block_channels: Sequence[int] = (),
         use_transformer: bool = False,
         transformer_d_model: int = 256,
         transformer_nhead: int = 8,
@@ -186,6 +188,17 @@ class TDSConvCTCModule(pl.LightningModule):
             nn.Flatten(start_dim=2),
         ]
 
+        # Pre-transformer TDS Conv blocks for local temporal feature extraction
+        if len(pre_block_channels) > 0:
+            model_layers.append(
+                TDSConvEncoder(
+                    num_features=num_features,
+                    block_channels=pre_block_channels,
+                    kernel_width=kernel_width,
+                    share_hand_weights=share_hand_weights,
+                )
+            )
+
         # Add Transformer encoder if enabled
         if use_transformer:
             model_layers.append(nn.Linear(num_features, transformer_d_model))
@@ -201,7 +214,7 @@ class TDSConvCTCModule(pl.LightningModule):
             )
             model_layers.append(nn.Linear(transformer_d_model, num_features))
 
-        # Add TDS Conv Encoder
+        # Post-transformer TDS Conv Encoder
         model_layers.extend([
             TDSConvEncoder(
                 num_features=num_features,
@@ -271,6 +284,150 @@ class TDSConvCTCModule(pl.LightningModule):
         target_lengths = target_lengths.detach().cpu().numpy()
         for i in range(N):
             # Unpad targets (T, N) for batch entry
+            target = LabelData.from_labels(targets[: target_lengths[i], i])
+            metrics.update(prediction=predictions[i], target=target)
+
+        self.log(f"{phase}/loss", loss, batch_size=N, sync_dist=True)
+        return loss
+
+    def _epoch_end(self, phase: str) -> None:
+        metrics = self.metrics[f"{phase}_metrics"]
+        self.log_dict(metrics.compute(), sync_dist=True)
+        metrics.reset()
+
+    def training_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("train", *args, **kwargs)
+
+    def validation_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("val", *args, **kwargs)
+
+    def test_step(self, *args, **kwargs) -> torch.Tensor:
+        return self._step("test", *args, **kwargs)
+
+    def on_train_epoch_end(self) -> None:
+        self._epoch_end("train")
+
+    def on_validation_epoch_end(self) -> None:
+        self._epoch_end("val")
+
+    def on_test_epoch_end(self) -> None:
+        self._epoch_end("test")
+
+    def configure_optimizers(self) -> dict[str, Any]:
+        return utils.instantiate_optimizer_and_scheduler(
+            self.parameters(),
+            optimizer_config=self.hparams.optimizer,
+            lr_scheduler_config=self.hparams.lr_scheduler,
+        )
+
+
+class BiGRUCTCModule(pl.LightningModule):
+    NUM_BANDS: ClassVar[int] = 2
+    ELECTRODE_CHANNELS: ClassVar[int] = 16
+
+    def __init__(
+        self,
+        in_features: int,
+        mlp_features: Sequence[int],
+        block_channels: Sequence[int],
+        kernel_width: int,
+        hidden_size: int,
+        num_layers: int,
+        dropout: float,
+        optimizer: DictConfig,
+        lr_scheduler: DictConfig,
+        decoder: DictConfig,
+        spec_norm_type: str = "BatchNorm2d",
+    ) -> None:
+        super().__init__()
+        self.save_hyperparameters()
+
+        num_features = self.NUM_BANDS * mlp_features[-1]
+
+        # Model: SpectrogramNorm -> MLP -> Flatten -> TDSConv -> BiGRU -> Linear -> LogSoftmax
+        self.norm = SpectrogramNorm(
+            channels=self.NUM_BANDS * self.ELECTRODE_CHANNELS,
+            spec_norm_type=spec_norm_type,
+        )
+        self.mlp = MultiBandRotationInvariantMLP(
+            in_features=in_features,
+            mlp_features=mlp_features,
+            num_bands=self.NUM_BANDS,
+        )
+        self.flatten = nn.Flatten(start_dim=2)
+        self.tds_encoder = TDSConvEncoder(
+            num_features=num_features,
+            block_channels=block_channels,
+            kernel_width=kernel_width,
+        )
+        self.gru = BiGRUEncoder(
+            input_size=num_features,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout,
+        )
+        self.output = nn.Sequential(
+            nn.Linear(hidden_size * 2, charset().num_classes),
+            nn.LogSoftmax(dim=-1),
+        )
+
+        # Criterion
+        self.ctc_loss = nn.CTCLoss(blank=charset().null_class)
+
+        # Decoder
+        self.decoder = instantiate(decoder)
+
+        # Metrics
+        metrics = MetricCollection([CharacterErrorRates()])
+        self.metrics = nn.ModuleDict(
+            {
+                f"{phase}_metrics": metrics.clone(prefix=f"{phase}/")
+                for phase in ["train", "val", "test"]
+            }
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        x = self.norm(inputs)
+        x = self.mlp(x)
+        x = self.flatten(x)
+        x = self.tds_encoder(x)
+        x = self.gru(x)
+        x = self.output(x)
+        return x
+
+    def _step(
+        self, phase: str, batch: dict[str, torch.Tensor], *args, **kwargs
+    ) -> torch.Tensor:
+        inputs = batch["inputs"]
+        targets = batch["targets"]
+        input_lengths = batch["input_lengths"]
+        target_lengths = batch["target_lengths"]
+        N = len(input_lengths)
+
+        emissions = self.forward(inputs)
+
+        # TDS Conv reduces temporal length; BiGRU preserves it after that
+        T_diff = inputs.shape[0] - emissions.shape[0]
+        emission_lengths = input_lengths - T_diff
+
+        loss = self.ctc_loss(
+            log_probs=emissions,
+            targets=targets.transpose(0, 1),
+            input_lengths=emission_lengths,
+            target_lengths=target_lengths,
+        )
+
+        # Decode emissions
+        predictions = self.decoder.decode_batch(
+            emissions=emissions.detach().cpu().numpy(),
+            emission_lengths=emission_lengths.detach().cpu().numpy(),
+        )
+
+        # Update metrics
+        metrics = self.metrics[f"{phase}_metrics"]
+        targets = targets.detach().cpu().numpy()
+        target_lengths = target_lengths.detach().cpu().numpy()
+        for i in range(N):
             target = LabelData.from_labels(targets[: target_lengths[i], i])
             metrics.update(prediction=predictions[i], target=target)
 

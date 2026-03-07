@@ -149,6 +149,47 @@ class TransformerEncoder(nn.Module):
         return self._encode(src, src_mask)
 
 
+class BiGRUEncoder(nn.Module):
+    """Bidirectional GRU encoder for sequence modeling.
+
+    Takes input of shape (T, N, input_size) and returns (T, N, output_size)
+    where output_size = 2 * hidden_size (bidirectional).
+
+    Args:
+        input_size: Number of input features.
+        hidden_size: Number of GRU hidden units per direction.
+        num_layers: Number of stacked GRU layers.
+        dropout: Dropout between GRU layers (applied if num_layers > 1).
+    """
+
+    def __init__(
+        self,
+        input_size: int,
+        hidden_size: int = 256,
+        num_layers: int = 2,
+        dropout: float = 0.1,
+    ) -> None:
+        super().__init__()
+        self.gru = nn.GRU(
+            input_size=input_size,
+            hidden_size=hidden_size,
+            num_layers=num_layers,
+            dropout=dropout if num_layers > 1 else 0.0,
+            bidirectional=True,
+            batch_first=False,  # input is (T, N, C)
+        )
+
+    def forward(self, inputs: torch.Tensor) -> torch.Tensor:
+        """
+        Args:
+            inputs: (T, N, input_size)
+        Returns:
+            (T, N, 2 * hidden_size)
+        """
+        outputs, _ = self.gru(inputs)
+        return outputs
+
+
 class SpectrogramNorm(nn.Module):
     """A `torch.nn.Module` that applies normalization over spectrogram
     per electrode channel per band. Inputs must be of shape
