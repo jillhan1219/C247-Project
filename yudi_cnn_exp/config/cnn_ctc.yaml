@@ -1,0 +1,16 @@
+# @package _global_
+module:
+  _target_: emg2qwerty.lightning.CNNCTCModuleV2
+  in_features: 528
+  mlp_features: [384]
+
+  cnn_channels: 384        # 比 256 更强（可选 256/384）
+  kernel_size: 7           # 比 5 更强一些
+  num_blocks: 6            # 更深（比 Level1 的 2 layers 强很多）
+  dropout: 0.15
+  dilation_growth: 2       # dilation: 1,2,4,8,16,32
+
+datamodule:
+  _target_: emg2qwerty.lightning.WindowedEMGDataModule
+  window_length: 8000
+  padding: [1800, 200]
