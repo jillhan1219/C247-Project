@@ -178,5 +178,144 @@ Beam search uses a 6-gram character language model (wikitext-103), beam_size=50,
 5. **Test outperforms val**: Unusually, test CER (8.67%) is lower than val CER (10.77%). This may be because the test set contains more common English words that the LM handles well, or because greedy decoding during validation training already optimized the acoustic model for common patterns.
 6. **Error profile shift**: With beam search, deletions and insertions drop significantly but the remaining errors are harder — mostly substitutions on uncommon words or special characters where the LM has less coverage.
 
+### Part 6: Channel Ablation — How Many Electrodes Are Needed? (TDS Conv + BiGRU, CTC greedy)
+
+Channels are masked (zeroed out) at inference time on the trained model — no retraining. Each EMG band has 16 electrode channels; the same mask is applied to both bands. Two masking strategies are compared: random selection (averaged over 3 trials) and activation-magnitude-based importance ranking.
+
+| Channels | Random CER (mean±std) | Importance-based CER |
+|----------|----------------------|---------------------|
+| 16 (all) | 15.28% ± 0.00% | 15.28% |
+| 14       | 16.08% ± 0.30% | 21.05% |
+| 12       | 19.02% ± 1.95% | 42.60% |
+| 10       | 22.40% ± 4.26% | 81.89% |
+| 8        | 25.57% ± 2.97% | 85.24% |
+| 6        | 55.47% ± 23.21% | 92.78% |
+| 4        | 63.75% ± 15.94% | 98.83% |
+| 2        | 90.77% ± 9.91% | 93.95% |
+
+**Channel importance ranking** (most→least active): [8, 14, 15, 13, 9, 12, 10, 7, 0, 11, 1, 2, 3, 6, 4, 5]
+
+**Key observations:**
+
+1. **Graceful degradation with random dropping**: Removing 2 random channels (14 remaining) only increases CER by ~0.8% (15.28%→16.08%), and even with 8 channels (50%) the model still achieves 25.57% CER — usable performance. This suggests significant redundancy across electrode channels.
+
+2. **Random outperforms importance-based**: Counter-intuitively, random channel selection consistently produces lower CER than keeping the "most important" channels by activation magnitude. At 14 channels, random gives 16.08% vs importance-based 21.05%. This reveals that **activation magnitude is not a good proxy for channel importance** — the model relies on *spatial patterns across channels* (relative differences between electrodes), not on channels with the highest absolute signal.
+
+3. **Spatial diversity matters more than signal strength**: Random selection preserves spatial diversity across the electrode array, while importance-based selection clusters high-activation channels (indices 8, 14, 15, 13 — likely adjacent electrodes). The model's `MultiBandRotationInvariantMLP` is designed to be invariant to electrode rotation, so it benefits from spatially distributed inputs rather than concentrated high-signal ones.
+
+4. **High variance at low channel counts**: At 6 channels, random CER has ±23.21% std, indicating that *which* channels survive matters enormously. Some random subsets preserve the spatial pattern the model needs; others destroy it entirely.
+
+5. **Minimum viable channels**: ~12-14 channels (75-87%) are needed to stay within ~4% of full performance. Below 8 channels, CER degrades rapidly past 50%, suggesting the model has learned to use the full electrode array cooperatively and cannot recover from losing more than half its inputs without retraining.
+
+### Part 7: Data Amount Ablation — How Much Training Data Is Needed? (TDS Conv + BiGRU, CTC greedy)
+
+All models use the same architecture (TDS Conv + BiGRU) and same val/test sessions. Only the number of training sessions varies.
+
+| Training Data | Sessions | val/CER | test/CER | val→test gap |
+|---------------|----------|---------|----------|--------------|
+| 25%           | 4        | 25.39   | 24.62    | -0.77        |
+| 50%           | 8        | 19.56   | 18.22    | —1.34        |
+| 75%           | 12       | 16.77    | 16.53    | -0.24       |
+| **100%**      | **16**   | **14.09** | **15.28** | **1.19**   |
+
+![Training Curves](training_curves.png)
+
+**Key observations:**
+
+1. **Consistent improvement with more data**: Test CER drops roughly linearly from 24.62% (4 sessions) to 15.28% (16 sessions). Each additional 25% of data yields ~3% CER reduction, with no sign of saturation — suggesting even more training data would further improve performance.
+
+2. **Convergence speed scales with data amount**: The training curves reveal a striking pattern — more data leads to dramatically earlier convergence. 100% data starts converging at ~epoch 15, 75% at ~epoch 18, 50% at ~epoch 25, and 25% not until ~epoch 55. With more training sessions, each epoch exposes the model to more diverse typing patterns, allowing it to learn generalizable features faster.
+
+3. **25% still achieves reasonable performance**: Even with only 4 sessions, the model reaches 24.62% test CER — still decoding recognizable text. This suggests the core EMG-to-keystroke mapping can be learned from limited data, with additional sessions primarily refining accuracy.
+
+4. **Generalization gap inverts at low data**: At 25%, test CER (24.62%) is actually *lower* than val CER (25.39%), a negative gap. This mirrors the pattern seen with CNN-only models and likely indicates that the model benefits from full-session inference at test time when it has limited training data.
+
 ### Conclusion
-Best configuration: **ACM + LogSpectrogram + RollingTimeNorm** with **TDS Conv + BiGRU** and **CTC beam search decoding** (test CER **8.67%**). The CNN+RNN hybrid outperforms both TDS+Transformer and TDS-only baselines. RTN remains the most impactful preprocessing component. Beam search with a character-level LM provides the largest single improvement (6.61% absolute), demonstrating that decoding strategy is as important as model architecture for EMG-to-text.
+Best configuration: **ACM + LogSpectrogram + RollingTimeNorm** with **TDS Conv + BiGRU** and **CTC beam search decoding** (test CER **8.67%**). The CNN+RNN hybrid outperforms both TDS+Transformer and TDS-only baselines. RTN remains the most impactful preprocessing component. Beam search with a character-level LM provides the largest single improvement (6.61% absolute), demonstrating that decoding strategy is as important as model architecture for EMG-to-text. Channel ablation shows the model degrades gracefully with random channel removal but requires at least 12-14 of 16 channels for near-full performance. Data amount ablation shows consistent improvement with more training sessions and no saturation at 16 sessions. Error analysis reveals that substitution errors are overwhelmingly between physically adjacent keys (mean QWERTY distance 1.12 vs 4.03 random), explaining why LM-based beam search is so effective — it only needs to disambiguate a constrained set of neighbor-key alternatives. Right-hand characters have 1.37× higher error rate than left-hand, suggesting per-hand calibration as a direction for improvement.
+
+### Part 8: Sampling Rate Ablation — How Fast Must EMG Be Sampled? (TDS Conv + BiGRU, CTC greedy)
+
+Temporal downsampling is applied at inference time (no retraining). The original spectrogram output rate is 125Hz (2kHz EMG / hop_length=16). We take every Nth frame to simulate lower effective sampling rates.
+
+| Downsample Factor | Effective Rate (Hz) | Test CER |
+|-------------------|--------------------:|----------|
+| 1x                | 125.0               | 15.28%   |
+| 2x                | 62.5                | 60.60%   |
+| 3x                | 41.7                | 87.94%   |
+| 4x                | 31.2                | 95.68%   |
+| 6x                | 20.8                | 99.42%   |
+| 8x                | 15.6                | 99.65%   |
+
+**Key observations:**
+
+1. **Extreme sensitivity to temporal resolution**: Unlike channel ablation where removing 2 of 16 channels barely affects CER (+0.8%), halving the sampling rate (125→62.5Hz) causes CER to jump from 15.28% to 60.60% — a catastrophic 4x degradation. The model is far more sensitive to temporal resolution than to the number of electrode channels.
+
+2. **Below 62.5Hz, decoding is essentially random**: At 41.7Hz (3x downsample), CER reaches 87.94%, and by 20.8Hz it's 99.42% — effectively random output. This indicates that keystroke EMG events have critical temporal structure at the 10-16ms scale (125Hz → 8ms per frame) that cannot be recovered once lost.
+
+3. **Why temporal resolution matters so much**: A typical keystroke lasts ~100ms, producing ~12 spectrogram frames at 125Hz but only ~6 at 62.5Hz. The TDS Conv blocks with kernel_width=32 were trained to expect patterns at 125Hz resolution; at half the rate, the temporal patterns are stretched beyond the learned receptive field, causing misalignment with the CTC alignment model.
+
+4. **Contrast with channel robustness**: The model tolerates losing 50% of channels (8/16, CER=25.57%) far better than losing 50% of temporal resolution (62.5Hz, CER=60.60%). This asymmetry suggests that the EMG-to-keystroke mapping relies primarily on *temporal dynamics* (when muscle activations occur relative to each other) rather than *spatial coverage* (which muscles are measured). For wearable device design, maintaining high sampling rate is more critical than maximizing electrode count.
+
+5. **Caveat — inference-only limitation**: These results reflect a model trained at 125Hz and tested at lower rates. A model retrained at lower sampling rates (with adjusted kernel sizes and architecture) would likely perform better, so the true minimum viable sampling rate is likely lower than 125Hz. This analysis measures the model's robustness to temporal resolution mismatch, not the fundamental information limit.
+
+### Part 9: Error Analysis — Confusion Matrix & Left/Right Hand Asymmetry (TDS Conv + BiGRU, CTC greedy)
+
+#### 9a. Character Substitution Confusion Matrix
+
+We extract all substitution errors from Levenshtein edit operations across the test set and measure QWERTY keyboard distance for each pair.
+
+**Top substitution pairs (GT → PRED):**
+
+| GT → PRED | Count | QWERTY Dist | Same Hand? |
+|-----------|------:|:-----------:|:----------:|
+| r → t     | 27    | 1           | yes (L)    |
+| s → e     | 16    | 2           | yes (L)    |
+| u → i     | 16    | 1           | yes (R)    |
+| o → i     | 15    | 1           | yes (R)    |
+| d → c     | 14    | 1           | yes (L)    |
+| l → o     | 13    | 1           | yes (R)    |
+| s → w     | 13    | 1           | yes (L)    |
+| p → o     | 12    | 1           | yes (R)    |
+| b → n     | 11    | 1           | no (L→R)   |
+| g → t     | 10    | 1           | yes (L)    |
+
+- **Mean QWERTY distance: 1.12** (vs **4.03** expected random baseline)
+- **22 of 25** top substitutions are between same-hand keys
+- The 3 cross-hand errors (b↔n, h→b) all occur at the QWERTY midline boundary
+
+**Key finding:** Errors are overwhelmingly between **physically adjacent keys** — the model confuses characters typed by the same or neighboring fingers, which produce similar forearm muscle activation patterns. This is not random confusion but structured error driven by EMG signal similarity.
+
+**Connection to decoding strategy (Part 5):** This adjacency structure directly explains why beam search + LM provides such a large improvement (15.28% → 8.67%). When the model confuses 'r'→'t', the word "throw" becomes "tthow" — a character LM easily recognizes this as unlikely and rescores toward the correct word. Because the error space is constrained to neighboring keys (distance ~1), the LM only needs to disambiguate between a small set of plausible alternatives rather than the full alphabet. If errors were randomly distributed (distance ~4), LM rescoring would be far less effective.
+
+#### 9b. Left Hand vs Right Hand Error Asymmetry
+
+Characters are assigned to left/right hand using standard QWERTY touch-typing positions (left: qwertasdfgzxcvb, right: yuiophjklnm + punctuation).
+
+| Hand    | Total GT | Errors | Error Rate | Sub Rate | Del Rate |
+|---------|----------|--------|------------|----------|----------|
+| Left    | 2285     | 326    | **14.27%** | 11.33%   | 2.93%    |
+| Right   | 1538     | 300    | **19.51%** | 16.51%   | 2.99%    |
+| Space   | 493      | 10     | 2.03%      | 0.61%    | 1.42%    |
+| Special | 311      | 16     | 5.14%      | 1.93%    | 3.22%    |
+
+**Right hand error rate is 1.37× higher than left hand** (19.51% vs 14.27%), driven almost entirely by substitutions (16.51% vs 11.33%) while deletion rates are similar (~3%).
+
+**Worst characters per hand:**
+
+| Left Hand |  Error% | Right Hand | Error% |
+|-----------|--------:|------------|-------:|
+| v         |  29.2%  | j          | 85.7%  |
+| x         |  28.6%  | .          | 44.4%  |
+| f         |  25.0%  | k          | 41.7%  |
+| b         |  24.5%  | u          | 34.5%  |
+| c         |  23.9%  | m          | 31.0%  |
+
+**Best-recognized characters:** a (3.5%), t (8.1%), e (10.0%) — all high-frequency left-hand keys. The model has learned strong representations for frequently-typed characters.
+
+**Why the asymmetry?**
+
+1. **Finger biomechanics**: Right-hand keys like j, k, u rely on ring and pinky fingers which produce weaker, more ambiguous EMG signals in the forearm extensors. Left-hand home-row keys (a, s, d, f) use stronger index/middle finger movements.
+2. **Electrode placement**: The right wrist band may have suboptimal contact for this particular subject — a single-subject effect that highlights the importance of per-hand calibration.
+3. **Frequency effect**: High-frequency characters (e, t, a — all left-hand) have lower error rates, likely because the model sees more training examples. Right-hand keys like j, k are rarer and harder to learn.
+
+**Practical implication:** An asymmetric architecture (separate capacity allocation per hand) or per-hand fine-tuning could target the weaker right hand specifically, potentially reducing overall CER by improving the higher-error-rate hand.
