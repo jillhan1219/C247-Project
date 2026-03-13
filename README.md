@@ -71,9 +71,9 @@ conda run -n scaling python -m emg2qwerty.train user=single_user train=False \
 
 | Folder | Author | Description |
 |--------|--------|-------------|
-| `jenny_cnn_rnn_exp/` | Jenny Ho | CNN + RNN hybrid experiments |
-| `jiwon-rnn-exp/` | Jiwon Bae | Standalone RNN (BiGRU, BiLSTM) experiments |
-| `yudi_cnn_exp/` | Yudi Chen | CNN-only architecture (TCN) experiments |
+| `discussion/jenny_cnn_rnn_exp/` | Jenny Ho | CNN + RNN hybrid experiments |
+| `discussion/jiwon-rnn-exp/` | Jiwon Bae | Standalone RNN (BiGRU, BiLSTM) experiments |
+| `discussion/yudi_cnn_exp/` | Yudi Chen | CNN-only architecture (TCN) experiments |
 
 ## Best Model Configuration
 
