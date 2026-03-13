@@ -57,5 +57,24 @@ wikitext-103-raw*
 # splashNet
 SplashNet/
 
+# Overleaf report
 69acba8e1810db0d40421195/
+
+# Saved models and generated configs
+models/
+hydra_configs/
+
+# Generated figures
+*.png
+
+# Working notes
+results.md
+time.md
+commands.md
+data.md
+guideline.md
+TODO.md
+AGENTS.md
+emg2qwerty_rubric_todo.md
+26W_ECE147_247_FinalProject_scoring_guide.md
 
